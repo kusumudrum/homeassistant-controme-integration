@@ -41,6 +41,11 @@ def scenes_read_url(base_url: str, house_id: Any) -> str:
     return f"{base_url.rstrip('/')}/get/json/v1/{house_id}/temperaturszenen/"
 
 
+def rltemps_read_url(base_url: str, house_id: Any, room_id: Any) -> str:
+    """Return the read URL of the return sensors of a room (without a room the list is empty)."""
+    return f"{base_url.rstrip('/')}/get/json/v1/{house_id}/rltemps/{room_id}/"
+
+
 def info_read_url(base_url: str, house_id: Any) -> str:
     """Return the read URL of the system info (hw, sw-date, branch; empty on some firmwares)."""
     return f"{base_url.rstrip('/')}/get/json/v1/{house_id}/info/"

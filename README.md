@@ -13,10 +13,10 @@ Home Assistant integration for Controme heating systems. This integration allows
 - Temperature control for each room
 - Current temperature monitoring
 - Humidity monitoring
-- Return temperature sensors
+- Return temperature sensors, one per return sensor from `/rltemps/`
 - Total offset display
 - Control deviation (current minus target temperature plus total offset)
-- Valve position from the room outputs (disabled by default)
+- Valve opening per output, and the mean of the room's outputs (disabled by default)
 - Further humidity and temperature sensors of a room (disabled by default)
 - Operation mode status
 - Transmission monitoring: shows when Controme last received sensor data and flags sensors that stopped transmitting
@@ -71,11 +71,13 @@ For each room, the integration creates:
 - Current Temperature
 - Target Temperature
 - Humidity
-- Return Temperature (if available)
+- Return Temperature (if available): sensors of `sensoren` whose description names a return flow ("Rücklauf", "RL", "return"), as before
+- **Return Temperatures** (`sensor.controme_<room>_return_<1-Wire ID>`, °C): one sensor per return sensor that Controme reports for the room in `/rltemps/<room>/`, also if the description does not say "Rücklauf". Named after the Controme description (unchanged, typos included; without one the 1-Wire ID), unique ID from the 1-Wire ID. Attributes `sensor_id`, `last_transmission` (not recorded) and `output` (only if Controme assigns an output, nothing is guessed). The sensor is unavailable if its last transmission is older than the stale sensor threshold (option, default 15 minutes). Sensors that already have a return sensor entity from a "Rücklauf" description get no second entity. The rooms are read one after another (the API has no request for all rooms); if the endpoint is missing or not allowed, this is logged once and no entities are created.
 - Total Offset (unit °C as before, although it is a difference; changing the unit would break the long-term statistics)
 - Operation Mode
 - **Control Deviation** (`sensor.controme_<room>_control_deviation`, unit K, device class temperature difference): current temperature minus target temperature plus total offset, rounded to 0.01 K. Negative means too cold. Calculated from the room data without an extra request; only created for rooms with current and target temperature. A missing total offset counts as 0.
 - **Valve Position** (`sensor.controme_<room>_valve`, %, disabled by default): mean of the room's outputs from `/outs/`. The attribute `outputs` lists the single outputs (e.g. `{"6": 0, "7": 25}`). Only created for rooms with outputs. On relay systems the outputs are only 0 or 1, so the value is 0-1 "%" there; that is why the sensor is disabled by default.
+- **Valve Outputs** (`sensor.controme_<room>_valve_<output>`, %, named "<Room> Valve <output>"): one sensor per output of the room from `/outs/` with its current opening (0-100 %, other values are unavailable). Output numbers are only unique per floor, so the floor is part of the unique ID. On relay systems the values are only 0 or 1.
 - **Further sensors** (`sensor.controme_<room>_sensor_<name>`, disabled by default): sensors of a room that are neither the room temperature sensor nor a return sensor, named after their Controme description, with the attributes `sensor_id` and `last_transmission`. Only sensors whose description clearly names humidity ("feuchte"/"humid", %) or temperature ("temp", °C) are created; all others are skipped (see the debug log), nothing is guessed. These sensors often only duplicate the existing humidity sensor of the room (e.g. "LuftFeuchte ..." sensors report the same value as the room humidity), which is why they are disabled by default.
 
 ### Transmission Monitoring (hub device)
@@ -169,7 +171,7 @@ data:
 - The duration of a temporary temperature is only approximate, and the API reports no status of the temporary mode. `controme.reset_temporary_temperature` only works with firmwares that report the permanent target temperature; setting the temperature normally always ends it.
 - Heating programs (schedules) cannot be switched or shown: the API has no call for it. Scenes are the alternative.
 - CPU load, temperature and uptime of the Controme system are not available through the API. Software and hardware version are only shown if the firmware reports them.
-- The valve position cannot tell relay outputs (0/1) from valve positions (0-100); the meaning depends on the Controme hardware. Outputs are read only, they cannot be set.
+- The valve position and the valve outputs cannot tell relay outputs (0/1) from valve positions (0-100); the meaning depends on the Controme hardware. Outputs are read only, they cannot be set. Controme reports no assignment of return sensors to outputs (`ausgang` is null on the tested firmware).
 - Further room sensors are only created if their description clearly names humidity or temperature. Other sensor types (e.g. of a room controller or a wireless thermometer) are not created.
 - The total offset keeps the unit °C (with the temperature device class) for compatibility; for Fahrenheit users the converted value of this difference is not meaningful. The control deviation uses K with the device class for temperature differences, so Home Assistant converts it correctly as a difference.
 - Floors without rooms and rooms without their own ID are shown, but neither a target temperature nor a temporary temperature can be set for them.

@@ -121,6 +121,12 @@
             "room_sensor": {
                 "name": "{sensor}"
             },
+            "valve_output": {
+                "name": "Valve {output}"
+            },
+            "return_temperature": {
+                "name": "{sensor}"
+            },
             "scenes": {
                 "name": "Temperature scenes"
             }

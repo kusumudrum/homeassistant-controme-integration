@@ -1,5 +1,6 @@
 """Support for Controme sensors."""
 import logging
+import math
 
 from homeassistant.components.sensor import (
     SensorEntity,
@@ -18,17 +19,24 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import slugify
 
 from .coordinator import ContromeConfigEntry
-from .entity import ContromeTransmissionEntity
+from homeassistant.util import dt as dt_util
+
+from .entity import ContromeTransmissionEntity, stale_threshold_minutes
 from .helpers import (
     ROOM_SENSOR_KIND_HUMIDITY,
     ROOM_SENSOR_KIND_TEMPERATURE,
     classify_room_sensor,
     control_deviation,
+    find_return_sensor,
     find_room,
     is_return_sensor,
     iter_rooms,
     normalize_outputs,
+    output_sort_key,
+    output_value,
     parse_transmission,
+    return_sensors,
+    transmission_age,
     scene_summaries,
     to_float,
     valve_position,
@@ -41,10 +49,13 @@ from .const import (
     SENSOR_TYPE_OPERATION_MODE,
     SENSOR_TYPE_CONTROL_DEVIATION,
     SENSOR_TYPE_VALVE,
+    SENSOR_TYPE_VALVE_OUTPUT,
+    SENSOR_TYPE_RETURN_TEMPERATURE,
     SENSOR_TYPE_ROOM_SENSOR_PREFIX,
 )
 
 from dataclasses import dataclass
+from datetime import timedelta
 
 _LOGGER = logging.getLogger(__name__)
 # Sensors only read coordinator data, so updates need no limit
@@ -129,6 +140,24 @@ SENSOR_TYPES: tuple[ContromeSensorEntityDescription, ...] = (
     ),
 )
 
+# One sensor per output of /outs/: the current opening of the valve in %
+VALVE_OUTPUT_DESCRIPTION = ContromeSensorEntityDescription(
+    key=SENSOR_TYPE_VALVE_OUTPUT,
+    translation_key=SENSOR_TYPE_VALVE_OUTPUT,
+    icon="mdi:valve",
+    state_class=SensorStateClass.MEASUREMENT,
+    native_unit_of_measurement=PERCENTAGE,
+)
+
+# One sensor per return sensor of /rltemps/<room>/, the name is the Controme description
+RETURN_TEMPERATURE_DESCRIPTION = ContromeSensorEntityDescription(
+    key=SENSOR_TYPE_RETURN_TEMPERATURE,
+    translation_key=SENSOR_TYPE_RETURN_TEMPERATURE,
+    device_class=SensorDeviceClass.TEMPERATURE,
+    state_class=SensorStateClass.MEASUREMENT,
+    native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+)
+
 async def async_setup_entry(hass: HomeAssistant, entry: ContromeConfigEntry, async_add_entities):
     """Set up the Controme sensor platform."""
     sensors = []
@@ -139,6 +168,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ContromeConfigEntry, asy
     if not data:
         _LOGGER.error("No data received from coordinator")
         return
+
+    # 1-Wire IDs of the return sensors from /rltemps/, each gets one entity only
+    return_names = set()
 
     # Process all floors and rooms
     for floor_id, room_id, room in iter_rooms(data):
@@ -187,6 +219,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ContromeConfigEntry, asy
         ausgang = room.get("ausgang")
         if isinstance(ausgang, dict) and ausgang:
             sensors.append(ContromeSensor(coordinator, entry, room, SENSOR_TYPE_VALVE, device_info))
+            # And one sensor per output; output numbers are only unique per floor
+            for output in sorted(normalize_outputs(ausgang), key=output_sort_key):
+                if output:
+                    sensors.append(ContromeValveOutputSensor(coordinator, entry, room, output, device_info))
 
         # Process return temperature sensors
         for sensor in room.get("sensoren", []):
@@ -203,6 +239,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ContromeConfigEntry, asy
                     )
                 )
                 _LOGGER.debug("Return sensor added")
+
+        # Return sensors from /rltemps/<room>/; those already created above from a
+        # "Rücklauf" description in "sensoren" keep their entity and get no second one
+        legacy_return = {sensor.get("name") for sensor in room.get("sensoren") or []
+                         if isinstance(sensor, dict) and is_return_sensor(sensor.get("beschreibung"))}
+        for sensor in return_sensors(room):
+            name = sensor["name"]
+            if name in legacy_return or name in return_names:
+                _LOGGER.debug("Skipping return sensor %s of room %s: it already has an entity",
+                              name, room_name)
+                continue
+            return_names.add(name)
+            sensors.append(ContromeReturnTemperatureSensor(coordinator, entry, room, sensor, device_info))
 
         # Further sensors of the room, only if clearly humidity or temperature
         seen_names = set()
@@ -395,6 +444,128 @@ class ContromeSensor(CoordinatorEntity, SensorEntity):
             else:
                 self._attr_native_value = value
                 self._has_value = value is not None
+
+class ContromeRoomEntity(CoordinatorEntity, SensorEntity):
+    """Base of the per-output and per-return-sensor entities on a room device."""
+
+    _attr_has_entity_name = True
+
+    def __init__(self, coordinator, config_entry, room_data, device_info):
+        """Initialize the entity on the room device of room_data."""
+        super().__init__(coordinator)
+        self._attr_device_info = device_info
+        self._room_id = room_data.get("room_id", room_data.get("id"))
+        self._floor_id = room_data.get("floor_id")
+        self._house_id = config_entry.data[CONF_HAUS_ID]
+        self._room_slug = slugify(room_data.get("name") or f"room_{self._room_id}")
+        self._has_value = False
+
+    @property
+    def available(self) -> bool:
+        """Return if the coordinator is up and the sensor has a valid value."""
+        # CoordinatorEntity.available only reflects the last coordinator update
+        return super().available and self._has_value
+
+    @property
+    def extra_state_attributes(self):
+        """Return the state attributes."""
+        return {
+            "room_id": self._room_id,
+            "floor_id": self._floor_id,
+            "house_id": self._house_id,
+        }
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Handle updated data from the coordinator."""
+        self._update_from_data()
+        self.async_write_ha_state()
+
+    def _update_from_data(self) -> None:
+        """Update the state from the coordinator data."""
+        raise NotImplementedError
+
+class ContromeValveOutputSensor(ContromeRoomEntity):
+    """Opening of a single output (valve) of a room in %, from /outs/."""
+
+    entity_description = VALVE_OUTPUT_DESCRIPTION
+
+    def __init__(self, coordinator, config_entry, room_data, output, device_info):
+        """Initialize the sensor of the output (stripped key of "ausgang")."""
+        super().__init__(coordinator, config_entry, room_data, device_info)
+        self._output = output
+        # Output numbers are only unique per floor, the floor ID is part of the IDs
+        self._attr_unique_id = (
+            f"{self._house_id}_{self._floor_id}_{self._room_id}_{SENSOR_TYPE_VALVE}_{output}"
+        )
+        self.entity_id = f"sensor.controme_{self._room_slug}_{SENSOR_TYPE_VALVE}_{slugify(output)}"
+        self._attr_translation_placeholders = {"output": output}
+        self._update_from_data()
+
+    @property
+    def extra_state_attributes(self):
+        """Return the state attributes."""
+        return {**super().extra_state_attributes, "output": self._output}
+
+    def _update_from_data(self) -> None:
+        """Update the opening; without /outs/ data or a valid value the sensor is unavailable."""
+        room = find_room(self.coordinator.data, self._floor_id, self._room_id)
+        outputs = normalize_outputs(room.get("ausgang")) if room is not None else {}
+        value = output_value(outputs.get(self._output))
+        self._attr_native_value = value
+        self._has_value = value is not None
+
+class ContromeReturnTemperatureSensor(ContromeRoomEntity):
+    """Temperature of a return sensor, from /rltemps/<room>/."""
+
+    entity_description = RETURN_TEMPERATURE_DESCRIPTION
+    # The transmission time changes with almost every update
+    _unrecorded_attributes = frozenset({"last_transmission"})
+
+    def __init__(self, coordinator, config_entry, room_data, sensor, device_info):
+        """Initialize the sensor of the /rltemps/ entry sensor (1-Wire ID in "name")."""
+        super().__init__(coordinator, config_entry, room_data, device_info)
+        self._sensor_id = sensor["name"]
+        # The 1-Wire ID identifies the sensor, independent of the room it is assigned to
+        self._attr_unique_id = f"{self._house_id}_rltemp_{self._sensor_id}"
+        self.entity_id = f"sensor.controme_{self._room_slug}_return_{slugify(self._sensor_id)}"
+        # The description is used unchanged, typos included; without one the 1-Wire ID
+        description = sensor.get("beschreibung")
+        if not isinstance(description, str) or not description.strip():
+            description = self._sensor_id
+        self._attr_translation_placeholders = {"sensor": description}
+        self._threshold = timedelta(minutes=stale_threshold_minutes(config_entry.options))
+        self._last_transmission = None
+        self._output = None
+        self._update_from_data()
+
+    @property
+    def extra_state_attributes(self):
+        """Return the state attributes; the output only if Controme reports one."""
+        attributes = {
+            **super().extra_state_attributes,
+            "sensor_id": self._sensor_id,
+            "last_transmission": self._last_transmission,
+        }
+        if self._output is not None:
+            attributes["output"] = self._output
+        return attributes
+
+    def _update_from_data(self) -> None:
+        """Update the temperature; a value older than the stale threshold is unavailable."""
+        sensor = find_return_sensor(self.coordinator.data, self._sensor_id)
+        if sensor is None:
+            # /rltemps/ failed or the sensor is no longer reported
+            self._has_value = False
+            return
+        value = to_float(sensor.get("wert"))
+        timestamp = parse_transmission(sensor.get("letzte_uebertragung"))
+        self._last_transmission = timestamp.isoformat() if timestamp else None
+        self._output = sensor.get("ausgang")
+        # Without a parseable timestamp the value is never stale, like in the stale sensors
+        stale = timestamp is not None and transmission_age(timestamp, dt_util.utcnow()) > self._threshold
+        self._attr_native_value = value
+        self._has_value = value is not None and math.isfinite(value) and not stale
 
 class ContromeOperationModeSensor(CoordinatorEntity, SensorEntity):
     """Representation of a Controme Operation Mode Sensor."""

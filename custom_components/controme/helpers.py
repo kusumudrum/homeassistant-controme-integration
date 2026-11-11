@@ -270,6 +270,33 @@ def valve_position(outputs: Dict[str, Any]) -> Optional[float]:
         return None
     return round(sum(values) / len(values), 2)
 
+def output_value(value: Any) -> Optional[float]:
+    """Return the opening of a single output in % (0-100), or None for other values."""
+    value = to_float(value)
+    if value is None or not math.isfinite(value) or not 0 <= value <= 100:
+        return None
+    return value
+
+def output_sort_key(output: str) -> tuple:
+    """Sort output numbers numerically ("2" before "10"), other keys after them."""
+    return (0, int(output), "") if output.isdigit() else (1, 0, output)
+
+def return_sensors(room: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Return the sensors of /rltemps/ ("rltemps") of a room that have a 1-Wire ID ("name")."""
+    sensors = room.get("rltemps")
+    if not isinstance(sensors, list):
+        return []
+    return [sensor for sensor in sensors if isinstance(sensor, dict)
+            and isinstance(sensor.get("name"), str) and sensor["name"].strip()]
+
+def find_return_sensor(data: Optional[List[Dict[str, Any]]], name: str) -> Optional[Dict[str, Any]]:
+    """Return the /rltemps/ entry with the 1-Wire ID name in any room, or None if it is gone."""
+    for _floor_id, _room_id, room in iter_rooms(data):
+        for sensor in return_sensors(room):
+            if sensor["name"] == name:
+                return sensor
+    return None
+
 def parse_transmission(value: Any) -> Optional[datetime]:
     """Parse a Controme transmission timestamp, returning None for empty or unknown values.
 
