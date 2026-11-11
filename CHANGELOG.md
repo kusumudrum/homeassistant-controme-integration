@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.5.0 (unreleased)
+
+### New Features
+- **Valve Outputs**: New room sensor per output of `/outs/`, `sensor.controme_<room>_valve_<output>` ("<Room> Valve <output>", %, state class measurement, enabled by default) with the current opening of the valve. Keys with leading spaces are stripped, values outside 0-100 are unavailable. Output numbers are only unique per floor, so the unique ID contains haus_id, floor, room and output (`<haus_id>_<floor>_<room>_valve_<output>`). The mean sensor `sensor.controme_<room>_valve` stays as it is.
+- **Return Temperatures**: New room sensor per return sensor of `/rltemps/<room>/`, `sensor.controme_<room>_return_<1-Wire ID>` (°C, state class measurement), named after the Controme description (fallback: 1-Wire ID), unique ID `<haus_id>_rltemp_<1-Wire ID>`. Attributes `sensor_id`, `last_transmission` and, only if Controme reports one, `output`. A value older than the stale sensor threshold (default 15 minutes) is unavailable.
+
+### Fixes
+- Return sensors were only created if their description named a return flow ("Rücklauf", "RL", "return"). Systems whose return sensors are named after the room (e.g. "Living room 2") got none. The new sensors use `/rltemps/`, which lists exactly the return sensors of a room.
+
+### Under the Hood
+- `/rltemps/` is read by the existing coordinator after `/temps/`, `/outs/` and the scene list, room by room with a 5 second timeout (the API answers `[]` without a room). A failed room only leaves its sensors unavailable; after a timeout, a connection error, HTTP 401, 403 or 404 the remaining rooms are skipped for this update. The problem is logged once as a warning and its end as info. The update itself never fails because of it, and nothing is written.
+- Purely additive: existing entity IDs, unique IDs and values are unchanged; return sensors that already have an entity from their "Rücklauf" description get no second one.
+- New offline tests with anonymized data (`tests/test_valves_return_temps.py`).
+
 ## 2.4.0 (2026-11-01)
 
 ### New Features
