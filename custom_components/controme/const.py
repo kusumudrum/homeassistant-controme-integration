@@ -48,8 +48,10 @@ SENSOR_TYPE_OPERATION_MODE = "operation_mode"
 SENSOR_TYPE_CONTROL_DEVIATION = "control_deviation"
 # Mean of the room's outputs from /outs/ ("ausgang")
 SENSOR_TYPE_VALVE = "valve"
-# One sensor per output from /outs/ ("valve_{output}")
+# One sensor per output from /outs/ ("valve_{output}") and per return sensor from
+# /rltemps/<room>/ (unique ID "{haus_id}_rltemp_{1-Wire ID}")
 SENSOR_TYPE_VALVE_OUTPUT = "valve_output"
+SENSOR_TYPE_RETURN_TEMPERATURE = "return_temperature"
 # Further sensors of a room from "sensoren" are "sensor_{name}" (return sensors "return_{name}")
 SENSOR_TYPE_ROOM_SENSOR_PREFIX = "sensor_"
 

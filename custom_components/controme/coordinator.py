@@ -9,7 +9,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .api import SHORT_REQUEST_TIMEOUT, async_get_json, scenes_read_url
+from .api import SHORT_REQUEST_TIMEOUT, async_get_json, rltemps_read_url, scenes_read_url
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
@@ -19,6 +19,11 @@ OUTS_REQUEST_TIMEOUT = ClientTimeout(total=5)
 # Scenes change rarely: the list is read during setup, then at most every 10 minutes
 # and with the next update after activate_scene
 SCENES_REFRESH_SECONDS = 600
+# /rltemps/ is read room by room; after a timeout or connection error the remaining rooms
+# are skipped, so an unreachable endpoint delays the update by at most 5 s
+RLTEMPS_REQUEST_TIMEOUT = ClientTimeout(total=5)
+# Missing endpoint or rights: the remaining rooms would answer the same
+RLTEMPS_STOP_STATUS = (401, 403, 404)
 
 type ContromeConfigEntry = ConfigEntry["ContromeDataUpdateCoordinator"]
 
@@ -47,6 +52,8 @@ class ContromeDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         # Last scene list from /temperaturszenen/ (None until it was read once)
         self.scenes: list | None = None
         self._scenes_read_at: float | None = None
+        # True while /rltemps/ fails, so the problem is logged once and the recovery too
+        self._rltemps_problem = False
 
     async def _async_update_data(self) -> Dict[str, Any]:
         """Fetch data from Controme API."""
@@ -81,6 +88,7 @@ class ContromeDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
 
         await self._async_add_outputs(session, data)
         await self._async_update_scenes()
+        await self._async_add_return_temps(session, data)
         return data
 
     def invalidate_scenes(self) -> None:
@@ -133,6 +141,50 @@ class ContromeDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
             key = _room_key(floor, room)
             if key in outputs:
                 room["ausgang"] = outputs[key]
+
+    async def _async_add_return_temps(self, session, data) -> None:
+        """Add the return sensors of each room from /rltemps/<room>/ as "rltemps" to the room data.
+
+        The API offers no request for all rooms (without a room it answers []), so the
+        rooms are read one after another. The return sensors are optional: a failed room
+        only leaves "rltemps" unset, and the update never fails because of them.
+        """
+        if not isinstance(data, list):
+            return
+        errors = []
+        for _floor, room in _iter_floor_rooms(data):
+            room_id = room.get("id")
+            # Only real numeric room IDs, the ID is part of the URL
+            if isinstance(room_id, bool) or not str(room_id).isdigit():
+                continue
+            endpoint = rltemps_read_url(self._base_url, self._house_id, room_id)
+            try:
+                async with session.get(endpoint, timeout=RLTEMPS_REQUEST_TIMEOUT) as response:
+                    if response.status != 200:
+                        errors.append(f"room {room_id}: HTTP {response.status}")
+                        if response.status in RLTEMPS_STOP_STATUS:
+                            break
+                        continue
+                    sensors = await response.json(content_type=None)
+            except (ClientError, TimeoutError) as err:
+                errors.append(f"room {room_id}: {type(err).__name__}")
+                break
+            except ValueError:
+                errors.append(f"room {room_id}: no JSON")
+                continue
+            if not isinstance(sensors, list):
+                errors.append(f"room {room_id}: unexpected answer")
+                continue
+            room["rltemps"] = [sensor for sensor in sensors if isinstance(sensor, dict)]
+
+        if errors and not self._rltemps_problem:
+            _LOGGER.warning("Could not read the return sensors (/rltemps/), their entities are "
+                            "unavailable or not created: %s", ", ".join(errors))
+        elif errors:
+            _LOGGER.debug("Could not read the return sensors (/rltemps/): %s", ", ".join(errors))
+        elif self._rltemps_problem:
+            _LOGGER.info("The return sensors (/rltemps/) can be read again")
+        self._rltemps_problem = bool(errors)
 
 def _iter_floor_rooms(floors: list):
     """Yield (floor, room) for all floors and rooms that are dicts."""

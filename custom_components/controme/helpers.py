@@ -281,6 +281,22 @@ def output_sort_key(output: str) -> tuple:
     """Sort output numbers numerically ("2" before "10"), other keys after them."""
     return (0, int(output), "") if output.isdigit() else (1, 0, output)
 
+def return_sensors(room: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Return the sensors of /rltemps/ ("rltemps") of a room that have a 1-Wire ID ("name")."""
+    sensors = room.get("rltemps")
+    if not isinstance(sensors, list):
+        return []
+    return [sensor for sensor in sensors if isinstance(sensor, dict)
+            and isinstance(sensor.get("name"), str) and sensor["name"].strip()]
+
+def find_return_sensor(data: Optional[List[Dict[str, Any]]], name: str) -> Optional[Dict[str, Any]]:
+    """Return the /rltemps/ entry with the 1-Wire ID name in any room, or None if it is gone."""
+    for _floor_id, _room_id, room in iter_rooms(data):
+        for sensor in return_sensors(room):
+            if sensor["name"] == name:
+                return sensor
+    return None
+
 def parse_transmission(value: Any) -> Optional[datetime]:
     """Parse a Controme transmission timestamp, returning None for empty or unknown values.
 

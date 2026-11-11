@@ -124,6 +124,9 @@
             "valve_output": {
                 "name": "Ventil {output}"
             },
+            "return_temperature": {
+                "name": "{sensor}"
+            },
             "scenes": {
                 "name": "Temperaturszenen"
             }
