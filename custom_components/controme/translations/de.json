@@ -121,6 +121,9 @@
             "room_sensor": {
                 "name": "{sensor}"
             },
+            "valve_output": {
+                "name": "Ventil {output}"
+            },
             "scenes": {
                 "name": "Temperaturszenen"
             }

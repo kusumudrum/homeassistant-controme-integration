@@ -28,6 +28,8 @@ from .helpers import (
     is_return_sensor,
     iter_rooms,
     normalize_outputs,
+    output_sort_key,
+    output_value,
     parse_transmission,
     scene_summaries,
     to_float,
@@ -41,6 +43,7 @@ from .const import (
     SENSOR_TYPE_OPERATION_MODE,
     SENSOR_TYPE_CONTROL_DEVIATION,
     SENSOR_TYPE_VALVE,
+    SENSOR_TYPE_VALVE_OUTPUT,
     SENSOR_TYPE_ROOM_SENSOR_PREFIX,
 )
 
@@ -129,6 +132,15 @@ SENSOR_TYPES: tuple[ContromeSensorEntityDescription, ...] = (
     ),
 )
 
+# One sensor per output of /outs/: the current opening of the valve in %
+VALVE_OUTPUT_DESCRIPTION = ContromeSensorEntityDescription(
+    key=SENSOR_TYPE_VALVE_OUTPUT,
+    translation_key=SENSOR_TYPE_VALVE_OUTPUT,
+    icon="mdi:valve",
+    state_class=SensorStateClass.MEASUREMENT,
+    native_unit_of_measurement=PERCENTAGE,
+)
+
 async def async_setup_entry(hass: HomeAssistant, entry: ContromeConfigEntry, async_add_entities):
     """Set up the Controme sensor platform."""
     sensors = []
@@ -187,6 +199,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ContromeConfigEntry, asy
         ausgang = room.get("ausgang")
         if isinstance(ausgang, dict) and ausgang:
             sensors.append(ContromeSensor(coordinator, entry, room, SENSOR_TYPE_VALVE, device_info))
+            # And one sensor per output; output numbers are only unique per floor
+            for output in sorted(normalize_outputs(ausgang), key=output_sort_key):
+                if output:
+                    sensors.append(ContromeValveOutputSensor(coordinator, entry, room, output, device_info))
 
         # Process return temperature sensors
         for sensor in room.get("sensoren", []):
@@ -395,6 +411,76 @@ class ContromeSensor(CoordinatorEntity, SensorEntity):
             else:
                 self._attr_native_value = value
                 self._has_value = value is not None
+
+class ContromeRoomEntity(CoordinatorEntity, SensorEntity):
+    """Base of the per-output entities on a room device."""
+
+    _attr_has_entity_name = True
+
+    def __init__(self, coordinator, config_entry, room_data, device_info):
+        """Initialize the entity on the room device of room_data."""
+        super().__init__(coordinator)
+        self._attr_device_info = device_info
+        self._room_id = room_data.get("room_id", room_data.get("id"))
+        self._floor_id = room_data.get("floor_id")
+        self._house_id = config_entry.data[CONF_HAUS_ID]
+        self._room_slug = slugify(room_data.get("name") or f"room_{self._room_id}")
+        self._has_value = False
+
+    @property
+    def available(self) -> bool:
+        """Return if the coordinator is up and the sensor has a valid value."""
+        # CoordinatorEntity.available only reflects the last coordinator update
+        return super().available and self._has_value
+
+    @property
+    def extra_state_attributes(self):
+        """Return the state attributes."""
+        return {
+            "room_id": self._room_id,
+            "floor_id": self._floor_id,
+            "house_id": self._house_id,
+        }
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Handle updated data from the coordinator."""
+        self._update_from_data()
+        self.async_write_ha_state()
+
+    def _update_from_data(self) -> None:
+        """Update the state from the coordinator data."""
+        raise NotImplementedError
+
+class ContromeValveOutputSensor(ContromeRoomEntity):
+    """Opening of a single output (valve) of a room in %, from /outs/."""
+
+    entity_description = VALVE_OUTPUT_DESCRIPTION
+
+    def __init__(self, coordinator, config_entry, room_data, output, device_info):
+        """Initialize the sensor of the output (stripped key of "ausgang")."""
+        super().__init__(coordinator, config_entry, room_data, device_info)
+        self._output = output
+        # Output numbers are only unique per floor, the floor ID is part of the IDs
+        self._attr_unique_id = (
+            f"{self._house_id}_{self._floor_id}_{self._room_id}_{SENSOR_TYPE_VALVE}_{output}"
+        )
+        self.entity_id = f"sensor.controme_{self._room_slug}_{SENSOR_TYPE_VALVE}_{slugify(output)}"
+        self._attr_translation_placeholders = {"output": output}
+        self._update_from_data()
+
+    @property
+    def extra_state_attributes(self):
+        """Return the state attributes."""
+        return {**super().extra_state_attributes, "output": self._output}
+
+    def _update_from_data(self) -> None:
+        """Update the opening; without /outs/ data or a valid value the sensor is unavailable."""
+        room = find_room(self.coordinator.data, self._floor_id, self._room_id)
+        outputs = normalize_outputs(room.get("ausgang")) if room is not None else {}
+        value = output_value(outputs.get(self._output))
+        self._attr_native_value = value
+        self._has_value = value is not None
 
 class ContromeOperationModeSensor(CoordinatorEntity, SensorEntity):
     """Representation of a Controme Operation Mode Sensor."""

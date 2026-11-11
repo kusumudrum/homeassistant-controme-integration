@@ -270,6 +270,17 @@ def valve_position(outputs: Dict[str, Any]) -> Optional[float]:
         return None
     return round(sum(values) / len(values), 2)
 
+def output_value(value: Any) -> Optional[float]:
+    """Return the opening of a single output in % (0-100), or None for other values."""
+    value = to_float(value)
+    if value is None or not math.isfinite(value) or not 0 <= value <= 100:
+        return None
+    return value
+
+def output_sort_key(output: str) -> tuple:
+    """Sort output numbers numerically ("2" before "10"), other keys after them."""
+    return (0, int(output), "") if output.isdigit() else (1, 0, output)
+
 def parse_transmission(value: Any) -> Optional[datetime]:
     """Parse a Controme transmission timestamp, returning None for empty or unknown values.
 

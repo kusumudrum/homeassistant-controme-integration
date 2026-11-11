@@ -48,6 +48,8 @@ SENSOR_TYPE_OPERATION_MODE = "operation_mode"
 SENSOR_TYPE_CONTROL_DEVIATION = "control_deviation"
 # Mean of the room's outputs from /outs/ ("ausgang")
 SENSOR_TYPE_VALVE = "valve"
+# One sensor per output from /outs/ ("valve_{output}")
+SENSOR_TYPE_VALVE_OUTPUT = "valve_output"
 # Further sensors of a room from "sensoren" are "sensor_{name}" (return sensors "return_{name}")
 SENSOR_TYPE_ROOM_SENSOR_PREFIX = "sensor_"
 
